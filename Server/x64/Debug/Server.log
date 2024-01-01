@@ -1,2 +1,4 @@
 ﻿  Server.cpp
+C:\Users\jards\source\repos\Server\Server\Server.cpp(44,26): warning C4267: '=': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\jards\source\repos\Server\Server\Server.cpp(68,9): warning C4101: 'iSendResult': unreferenced local variable
   Server.vcxproj -> C:\Users\jards\source\repos\Server\x64\Debug\Server.exe
