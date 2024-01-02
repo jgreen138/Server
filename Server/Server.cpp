@@ -1,54 +1,64 @@
+// Undefine UNICODE and define WIN32_LEAN_AND_MEAN to exclude unnecessary headers
 #undef UNICODE
 #define WIN32_LEAN_AND_MEAN
 
+// Include necessary headers
 #include <windows.h>
-#include <WinSock2.h>
+#include <winsock2.h>
 #include <ws2tcpip.h>
-#include <stdlib.h>
 #include <stdio.h>
-#include <process.h>
+#include <process.h>  // For _beginthreadex
 #include <string>
 #include <atomic>
+#include <thread>
 
+// Link with the Winsock library
 #pragma comment(lib, "Ws2_32.lib")
 
+// Define constants
 #define DEFAULT_BUFLEN 512
 #define FILE_BUFLEN 1024
 #define DEFAULT_PORT "27015"
 
-// Counter for numbering clients
+// Atomic variable to keep track of the number of connected clients
 std::atomic_int clientCount(0);
+
+// Function to print errors
+void printError(const char* action) {
+    printf("%s failed with error: %d\n", action, WSAGetLastError());
+}
 
 // Function to send an error message to the client
 void sendErrorMessage(SOCKET clientSocket, const std::string& clientName, const std::string& errorMessage) {
+    // Send the error message to the client
     int iResult = send(clientSocket, errorMessage.c_str(), static_cast<int>(errorMessage.length()), 0);
     if (iResult == SOCKET_ERROR) {
+        // Print an error message if sending fails
         printf("%s: Error sending error message to the client: %d\n", clientName.c_str(), WSAGetLastError());
     }
 }
 
 // Function to send a file to the client
 int sendFile(SOCKET clientSocket, const char* fileName, const std::string& clientName) {
-    // Construct the full path for the file based on the current executable's location
+    // Get the full path of the file
     char fullPath[MAX_PATH];
     if (GetModuleFileNameA(NULL, fullPath, MAX_PATH) == 0) {
         printf("Error getting module filename\n");
         return -1;
     }
 
-    // Remove the filename from the full path
     char* lastBackslash = strrchr(fullPath, '\\');
     if (lastBackslash != NULL) {
-        *(lastBackslash + 1) = '\0';  // Null-terminate after the last backslash
+        *(lastBackslash + 1) = '\0';
     }
 
-    // Append the filename to the path
     strcat_s(fullPath, MAX_PATH, fileName);
 
+    // Open the file for reading
     FILE* file;
     if (fopen_s(&file, fullPath, "rb") != 0) {
-        // Send an error message to the client if the file does not exist
-        std::string errorMessage = "File not found: " + std::string(fileName);
+        // If the file is not found, send an error message to the client
+        std::string errorMessage = "Error: File not found - " + std::string(fileName);
         sendErrorMessage(clientSocket, clientName, errorMessage);
         return -1;
     }
@@ -56,11 +66,14 @@ int sendFile(SOCKET clientSocket, const char* fileName, const std::string& clien
     char fileBuf[FILE_BUFLEN];
     int bytesRead, iResult;
 
+    // Read and send the file in chunks
     do {
         bytesRead = fread(fileBuf, 1, sizeof(fileBuf), file);
         if (bytesRead > 0) {
+            // Send the file data to the client
             iResult = send(clientSocket, fileBuf, bytesRead, 0);
             if (iResult == SOCKET_ERROR) {
+                // Print an error message if sending fails
                 printf("%s: Error sending file to the client: %d\n", clientName.c_str(), WSAGetLastError());
                 fclose(file);
                 return -1;
@@ -68,138 +81,139 @@ int sendFile(SOCKET clientSocket, const char* fileName, const std::string& clien
         }
     } while (bytesRead > 0);
 
+    // Close the file
     fclose(file);
     return 0;
 }
 
 // Function to handle each client in a separate thread
-void clientThread(SOCKET clientSocket) {
-    int currentClient = clientCount.fetch_add(1); // Atomically increment and get the current value
-
-    // Naming the client based on the connection order
+void clientThread(SOCKET clientSocket, int currentClient) {
+    // Generate a unique name for the client using the client count
     std::string clientName = "Client_" + std::to_string(currentClient);
-
-    // Print a message indicating that a client has connected
     printf("%s: Connected to the server.\n", clientName.c_str());
 
     char recvbuf[DEFAULT_BUFLEN];
     int recvbuflen = DEFAULT_BUFLEN;
     int iResult;
 
-    // Receive until the peer shuts down the connection
+    // Main loop to receive file requests from the client
     do {
-        // Receive the file name from the client
+        // Receive data from the client
         iResult = recv(clientSocket, recvbuf, recvbuflen, 0);
         if (iResult > 0) {
+            // Null-terminate the received data
             recvbuf[iResult] = '\0';
             printf("%s: Bytes received: %d\n", clientName.c_str(), iResult);
             printf("%s: Requested file: %s\n", clientName.c_str(), recvbuf);
 
-            // Attempt to send the requested file
             printf("%s: Attempting to send file...\n", clientName.c_str());
+            // Attempt to send the requested file to the client
             if (sendFile(clientSocket, recvbuf, clientName) == 0) {
                 printf("%s: File sent successfully.\n", clientName.c_str());
             }
             else {
                 printf("%s: Error sending file.\n", clientName.c_str());
-                // No need to break here, continue handling the next request
             }
         }
         else {
-            // Handle other cases (connection closing, recv error)...
-
-            // If no data received, assume the client disconnected
+            // Handle client disconnection
             printf("%s: Client disconnected unexpectedly.\n", clientName.c_str());
-            break;  // Exit the loop on recv error
+            break;
         }
-
     } while (true);
 
-    // cleanup for the current client
+    // Close the client socket
     closesocket(clientSocket);
     printf("%s: Disconnected.\n", clientName.c_str());
 }
 
+// Main function
 int main(void) {
+    // Initialize Winsock
     WSADATA wsaData;
     int iResult;
 
+    // Socket variables
     SOCKET ListenSocket = INVALID_SOCKET;
     SOCKET ClientSocket = INVALID_SOCKET;
 
+    // Address info variables
     struct addrinfo* result = NULL;
     struct addrinfo hints;
 
     // Initialize Winsock
     iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
     if (iResult != 0) {
-        printf("WSAStartup failed with error: %d\n", iResult);
+        printError("WSAStartup");
         return 1;
     }
 
+    // Configure address info hints for the server
     ZeroMemory(&hints, sizeof(hints));
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
     hints.ai_flags = AI_PASSIVE;
 
-    // Resolve the server address and port
+    // Resolve the local address and port to be used by the server
     iResult = getaddrinfo(NULL, DEFAULT_PORT, &hints, &result);
     if (iResult != 0) {
-        printf("getaddrinfo failed with error: %d\n", iResult);
+        printError("getaddrinfo");
         WSACleanup();
         return 1;
     }
 
-    // Create a SOCKET for the server to listen for client connections.
+    // Create a socket for the server
     ListenSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
     if (ListenSocket == INVALID_SOCKET) {
-        printf("socket failed with error: %ld\n", WSAGetLastError());
+        printError("socket");
         freeaddrinfo(result);
         WSACleanup();
         return 1;
     }
 
-    // Setup the TCP listening socket
-    iResult = bind(ListenSocket, result->ai_addr, (int)result->ai_addrlen);
+    // Bind the socket
+    iResult = bind(ListenSocket, result->ai_addr, static_cast<int>(result->ai_addrlen));
     if (iResult == SOCKET_ERROR) {
-        printf("bind failed with error: %d\n", WSAGetLastError());
+        printError("bind");
         freeaddrinfo(result);
         closesocket(ListenSocket);
         WSACleanup();
         return 1;
     }
 
+    // Free the address info
     freeaddrinfo(result);
 
+    // Set the socket to listen for incoming connections
     iResult = listen(ListenSocket, SOMAXCONN);
     if (iResult == SOCKET_ERROR) {
-        printf("listen failed with error: %d\n", WSAGetLastError());
+        printError("listen");
         closesocket(ListenSocket);
         WSACleanup();
         return 1;
     }
 
-    // Indicate that the server is now waiting for a client to connect
+    // Print a message indicating the server is ready and waiting
     printf("Server is ready and waiting for a client to connect...\n");
 
-    // Accept multiple client connections
+    // Main server loop to accept client connections
     while (true) {
-        // Accept a client socket
+        // Accept a new client connection
         ClientSocket = accept(ListenSocket, NULL, NULL);
         if (ClientSocket == INVALID_SOCKET) {
-            printf("accept failed with error: %d\n", WSAGetLastError());
+            // Print an error message if accepting a connection fails
+            printError("accept");
             closesocket(ListenSocket);
             WSACleanup();
             return 1;
         }
 
-        // Start a new thread to handle the client
-        uintptr_t threadID;
-        _beginthreadex(NULL, 0, (_beginthreadex_proc_type)clientThread, (void*)ClientSocket, 0, (unsigned*)&threadID);
+        // Create a new thread to handle the client and detach it
+        std::thread(clientThread, ClientSocket, clientCount.fetch_add(1)).detach();
     }
 
-    // cleanup
+    // Close the listening socket and clean up Winsock
     closesocket(ListenSocket);
     WSACleanup();
 

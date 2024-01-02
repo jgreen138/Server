@@ -1,3 +1,3 @@
 ﻿  Server.cpp
-C:\Users\jards\source\repos\Server\Server\Server.cpp(60,26): warning C4267: '=': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\jards\source\repos\Server\Server\Server.cpp(71,26): warning C4267: '=': conversion from 'size_t' to 'int', possible loss of data
   Server.vcxproj -> C:\Users\jards\source\repos\Server\x64\Debug\Server.exe
