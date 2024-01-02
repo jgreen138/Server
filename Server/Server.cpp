@@ -38,12 +38,13 @@ int sendFile(SOCKET clientSocket, const char* fileName) {
     }
 
     char fileBuf[FILE_BUFLEN];
-    int bytesRead;
+    int bytesRead, iResult;
 
     do {
         bytesRead = fread(fileBuf, 1, sizeof(fileBuf), file);
         if (bytesRead > 0) {
-            if (send(clientSocket, fileBuf, bytesRead, 0) == SOCKET_ERROR) {
+            iResult = send(clientSocket, fileBuf, bytesRead, 0);
+            if (iResult == SOCKET_ERROR) {
                 printf("Error sending file to the client: %d\n", WSAGetLastError());
                 fclose(file);
                 return -1;
@@ -119,60 +120,89 @@ int main(void) {
         return 1;
     }
 
-    // Accept a client socket
-    ClientSocket = accept(ListenSocket, NULL, NULL);
-    if (ClientSocket == INVALID_SOCKET) {
-        printf("accept failed with error: %d\n", WSAGetLastError());
-        closesocket(ListenSocket);
-        WSACleanup();
-        return 1;
-    }
+    // Indicate that the server is now waiting for a client to connect
+    printf("Server is ready and waiting for a client to connect...\n");
 
-    // No longer need the listening socket
-    closesocket(ListenSocket);
-
-    // Receive until the peer shuts down the connection
-    do {
-        iResult = recv(ClientSocket, recvbuf, recvbuflen, 0);
-        if (iResult > 0) {
-            printf("Bytes received: %d\n", iResult);
-
-            // Requested file name received from the client
-            recvbuf[iResult] = '\0';  // Null-terminate the received file name
-            printf("Requested file: %s\n", recvbuf);
-
-            // Send the file to the client
-            printf("Attempting to send file...\n");
-            if (sendFile(ClientSocket, recvbuf) == -1) {
-                printf("Error sending file to the client\n");
-                closesocket(ClientSocket);
-                WSACleanup();
-                return 1;
-            }
-            printf("File sent successfully.\n");
-        }
-        else if (iResult == 0) {
-            printf("Connection closing...\n");
-        }
-        else {
-            printf("recv failed with error: %d\n", WSAGetLastError());
-            closesocket(ClientSocket);
+    // Accept multiple client connections
+    while (true) {
+        // Accept a client socket
+        ClientSocket = accept(ListenSocket, NULL, NULL);
+        if (ClientSocket == INVALID_SOCKET) {
+            printf("accept failed with error: %d\n", WSAGetLastError());
+            closesocket(ListenSocket);
             WSACleanup();
             return 1;
         }
-    } while (iResult > 0);
 
-    // shutdown the connection since we're done
-    iResult = shutdown(ClientSocket, SD_SEND);
-    if (iResult == SOCKET_ERROR) {
-        printf("shutdown failed with error: %d\n", WSAGetLastError());
+        // Print a message indicating that a client has connected
+        printf("Client has connected to the server.\n");
+
+        // Receive until the peer shuts down the connection
+        do {
+            // Receive the file name from the client
+            iResult = recv(ClientSocket, recvbuf, recvbuflen, 0);
+            if (iResult > 0) {
+                recvbuf[iResult] = '\0';
+                printf("Bytes received: %d\n", iResult);
+                printf("Requested file: %s\n", recvbuf);
+
+                // Attempt to send the requested file
+                printf("Attempting to send file...\n");
+                if (sendFile(ClientSocket, recvbuf) == 0) {
+                    printf("File sent successfully.\n");
+                }
+                else {
+                    printf("Error sending file.\n");
+                    break;  // Exit the loop on send error
+                }
+            }
+            else if (iResult == 0) {
+                printf("Connection closing...\n");
+                break;  // Exit the loop on connection closing
+            }
+            else {
+                int error = WSAGetLastError();
+                printf("recv failed with error: %d\n", error);
+
+                if (error == WSAECONNRESET) {
+                    printf("Client disconnected unexpectedly.\n");
+                }
+                else {
+                    printf("Error details: %d\n", error);
+                }
+                break;  // Exit the loop on recv error
+            }
+
+        } while (true);
+
+        // cleanup for the current client
         closesocket(ClientSocket);
-        WSACleanup();
-        return 1;
+        printf("Client disconnected.\n");
+
+        // Ask if the server should continue to listen for more clients
+        printf("Do you want to continue listening for more clients? (yes/no): ");
+        char userChoice[10];
+        if (fgets(userChoice, sizeof(userChoice), stdin) == NULL) {
+            printf("Error reading user input\n");
+            break;  // Exit the loop if input fails
+        }
+
+        // Remove the newline character from the user choice
+        size_t len = strlen(userChoice);
+        if (len > 0 && userChoice[len - 1] == '\n') {
+            userChoice[len - 1] = '\0';
+        }
+
+        if (strcmp(userChoice, "no") == 0) {
+            break;  // Exit the loop if the user chooses 'no'
+        }
+        else if (strcmp(userChoice, "yes") == 0) {
+            printf("Server is ready and waiting for a client to connect...\n"); // Continue the loop if user chooses 'yes'
+        }
     }
 
     // cleanup
-    closesocket(ClientSocket);
+    closesocket(ListenSocket);
     WSACleanup();
 
     return 0;
