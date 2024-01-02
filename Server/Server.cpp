@@ -6,6 +6,9 @@
 #include <ws2tcpip.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <process.h>
+#include <string>
+#include <atomic>
 
 #pragma comment(lib, "Ws2_32.lib")
 
@@ -13,8 +16,19 @@
 #define FILE_BUFLEN 1024
 #define DEFAULT_PORT "27015"
 
+// Counter for numbering clients
+std::atomic_int clientCount(0);
+
+// Function to send an error message to the client
+void sendErrorMessage(SOCKET clientSocket, const std::string& clientName, const std::string& errorMessage) {
+    int iResult = send(clientSocket, errorMessage.c_str(), static_cast<int>(errorMessage.length()), 0);
+    if (iResult == SOCKET_ERROR) {
+        printf("%s: Error sending error message to the client: %d\n", clientName.c_str(), WSAGetLastError());
+    }
+}
+
 // Function to send a file to the client
-int sendFile(SOCKET clientSocket, const char* fileName) {
+int sendFile(SOCKET clientSocket, const char* fileName, const std::string& clientName) {
     // Construct the full path for the file based on the current executable's location
     char fullPath[MAX_PATH];
     if (GetModuleFileNameA(NULL, fullPath, MAX_PATH) == 0) {
@@ -33,7 +47,9 @@ int sendFile(SOCKET clientSocket, const char* fileName) {
 
     FILE* file;
     if (fopen_s(&file, fullPath, "rb") != 0) {
-        printf("Error opening file: %s\n", fullPath);
+        // Send an error message to the client if the file does not exist
+        std::string errorMessage = "File not found: " + std::string(fileName);
+        sendErrorMessage(clientSocket, clientName, errorMessage);
         return -1;
     }
 
@@ -45,7 +61,7 @@ int sendFile(SOCKET clientSocket, const char* fileName) {
         if (bytesRead > 0) {
             iResult = send(clientSocket, fileBuf, bytesRead, 0);
             if (iResult == SOCKET_ERROR) {
-                printf("Error sending file to the client: %d\n", WSAGetLastError());
+                printf("%s: Error sending file to the client: %d\n", clientName.c_str(), WSAGetLastError());
                 fclose(file);
                 return -1;
             }
@@ -54,6 +70,54 @@ int sendFile(SOCKET clientSocket, const char* fileName) {
 
     fclose(file);
     return 0;
+}
+
+// Function to handle each client in a separate thread
+void clientThread(SOCKET clientSocket) {
+    int currentClient = clientCount.fetch_add(1); // Atomically increment and get the current value
+
+    // Naming the client based on the connection order
+    std::string clientName = "Client_" + std::to_string(currentClient);
+
+    // Print a message indicating that a client has connected
+    printf("%s: Connected to the server.\n", clientName.c_str());
+
+    char recvbuf[DEFAULT_BUFLEN];
+    int recvbuflen = DEFAULT_BUFLEN;
+    int iResult;
+
+    // Receive until the peer shuts down the connection
+    do {
+        // Receive the file name from the client
+        iResult = recv(clientSocket, recvbuf, recvbuflen, 0);
+        if (iResult > 0) {
+            recvbuf[iResult] = '\0';
+            printf("%s: Bytes received: %d\n", clientName.c_str(), iResult);
+            printf("%s: Requested file: %s\n", clientName.c_str(), recvbuf);
+
+            // Attempt to send the requested file
+            printf("%s: Attempting to send file...\n", clientName.c_str());
+            if (sendFile(clientSocket, recvbuf, clientName) == 0) {
+                printf("%s: File sent successfully.\n", clientName.c_str());
+            }
+            else {
+                printf("%s: Error sending file.\n", clientName.c_str());
+                // No need to break here, continue handling the next request
+            }
+        }
+        else {
+            // Handle other cases (connection closing, recv error)...
+
+            // If no data received, assume the client disconnected
+            printf("%s: Client disconnected unexpectedly.\n", clientName.c_str());
+            break;  // Exit the loop on recv error
+        }
+
+    } while (true);
+
+    // cleanup for the current client
+    closesocket(clientSocket);
+    printf("%s: Disconnected.\n", clientName.c_str());
 }
 
 int main(void) {
@@ -65,10 +129,6 @@ int main(void) {
 
     struct addrinfo* result = NULL;
     struct addrinfo hints;
-
-    int iSendResult;
-    char recvbuf[DEFAULT_BUFLEN];
-    int recvbuflen = DEFAULT_BUFLEN;
 
     // Initialize Winsock
     iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
@@ -134,71 +194,9 @@ int main(void) {
             return 1;
         }
 
-        // Print a message indicating that a client has connected
-        printf("Client has connected to the server.\n");
-
-        // Receive until the peer shuts down the connection
-        do {
-            // Receive the file name from the client
-            iResult = recv(ClientSocket, recvbuf, recvbuflen, 0);
-            if (iResult > 0) {
-                recvbuf[iResult] = '\0';
-                printf("Bytes received: %d\n", iResult);
-                printf("Requested file: %s\n", recvbuf);
-
-                // Attempt to send the requested file
-                printf("Attempting to send file...\n");
-                if (sendFile(ClientSocket, recvbuf) == 0) {
-                    printf("File sent successfully.\n");
-                }
-                else {
-                    printf("Error sending file.\n");
-                    break;  // Exit the loop on send error
-                }
-            }
-            else if (iResult == 0) {
-                printf("Connection closing...\n");
-                break;  // Exit the loop on connection closing
-            }
-            else {
-                int error = WSAGetLastError();
-                printf("recv failed with error: %d\n", error);
-
-                if (error == WSAECONNRESET) {
-                    printf("Client disconnected unexpectedly.\n");
-                }
-                else {
-                    printf("Error details: %d\n", error);
-                }
-                break;  // Exit the loop on recv error
-            }
-
-        } while (true);
-
-        // cleanup for the current client
-        closesocket(ClientSocket);
-        printf("Client disconnected.\n");
-
-        // Ask if the server should continue to listen for more clients
-        printf("Do you want to continue listening for more clients? (yes/no): ");
-        char userChoice[10];
-        if (fgets(userChoice, sizeof(userChoice), stdin) == NULL) {
-            printf("Error reading user input\n");
-            break;  // Exit the loop if input fails
-        }
-
-        // Remove the newline character from the user choice
-        size_t len = strlen(userChoice);
-        if (len > 0 && userChoice[len - 1] == '\n') {
-            userChoice[len - 1] = '\0';
-        }
-
-        if (strcmp(userChoice, "no") == 0) {
-            break;  // Exit the loop if the user chooses 'no'
-        }
-        else if (strcmp(userChoice, "yes") == 0) {
-            printf("Server is ready and waiting for a client to connect...\n"); // Continue the loop if user chooses 'yes'
-        }
+        // Start a new thread to handle the client
+        uintptr_t threadID;
+        _beginthreadex(NULL, 0, (_beginthreadex_proc_type)clientThread, (void*)ClientSocket, 0, (unsigned*)&threadID);
     }
 
     // cleanup
@@ -207,4 +205,3 @@ int main(void) {
 
     return 0;
 }
-
